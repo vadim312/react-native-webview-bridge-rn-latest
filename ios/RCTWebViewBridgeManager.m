@@ -16,6 +16,7 @@
 #import <React/RCTUIManager.h>
 #import "RCTWebViewBridge.h"
 #import "UIView+React.h"
+#import <WebKit/WebKit.h>
 
 @interface RCTWebViewBridgeManager () <RCTWebViewBridgeDelegate>
 
@@ -57,12 +58,12 @@ RCT_EXPORT_VIEW_PROPERTY(onBridgeMessage, RCTDirectEventBlock)
   return @{
     @"JSNavigationScheme": RCTJSNavigationScheme,
     @"NavigationType": @{
-      @"LinkClicked": @(UIWebViewNavigationTypeLinkClicked),
-      @"FormSubmitted": @(UIWebViewNavigationTypeFormSubmitted),
-      @"BackForward": @(UIWebViewNavigationTypeBackForward),
-      @"Reload": @(UIWebViewNavigationTypeReload),
-      @"FormResubmitted": @(UIWebViewNavigationTypeFormResubmitted),
-      @"Other": @(UIWebViewNavigationTypeOther)
+        @"LinkClicked": @(WKNavigationTypeLinkActivated),
+        @"FormSubmitted": @(WKNavigationTypeFormSubmitted),
+      @"BackForward": @(WKNavigationTypeBackForward),
+      @"Reload": @(WKNavigationTypeReload),
+      @"FormResubmitted": @(WKNavigationTypeFormResubmitted),
+      @"Other": @(WKNavigationTypeOther)
     },
   };
 }
