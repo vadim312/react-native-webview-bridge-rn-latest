@@ -31,6 +31,8 @@
 //we don'e need this one since it has been defined in RCTWebView.m
 NSString *const RCTJSNavigationScheme = @"react-js-navigation";
 NSString *const RCTWebViewBridgeSchema = @"wvb";
+static NSURLCredential* clientAuthenticationCredential;
+static NSDictionary* customCertificatesForHost;
 
 // runtime trick to remove WKWebView keyboard default toolbar
 // see: http://stackoverflow.com/questions/19033292/ios-7-wkwebview-keyboard-issue/19042279#19042279
@@ -49,7 +51,8 @@ NSString *const RCTWebViewBridgeSchema = @"wvb";
 @property (nonatomic, copy) RCTDirectEventBlock onLoadingError;
 @property (nonatomic, copy) RCTDirectEventBlock onShouldStartLoadWithRequest;
 @property (nonatomic, copy) RCTDirectEventBlock onBridgeMessage;
-
+@property (nonatomic, copy) RCTDirectEventBlock onHttpError;
+@property (nonatomic, copy) RCTDirectEventBlock onFileDownload;
 @end
 
 @implementation RCTWebViewBridge
@@ -61,9 +64,11 @@ NSString *const RCTWebViewBridgeSchema = @"wvb";
 - (instancetype)initWithFrame:(CGRect)frame
 {
   if ((self = [super initWithFrame:frame])) {
+      
     super.backgroundColor = [UIColor clearColor];
     _automaticallyAdjustContentInsets = YES;
     _contentInset = UIEdgeInsetsZero;
+      
     _webView = [[WKWebView alloc] initWithFrame:self.bounds];
     _webView.navigationDelegate = self;
       if (@available(iOS 10.0, *)) {
@@ -77,19 +82,40 @@ NSString *const RCTWebViewBridgeSchema = @"wvb";
   return self;
 }
 
--(void)webView:(WKWebView *)webView didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential * _Nullable))completionHandler
+- (void)                    webView:(WKWebView *)webView
+  didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge
+                  completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition disposition, NSURLCredential * _Nullable))completionHandler
 {
-    NSURLCredential* newCredential = nil;
-    if ([[[challenge protectionSpace]authenticationMethod] isEqualToString: @"NSURLAuthenticationMethodServerTrust"]) {
-            SecTrustRef serverTrust = challenge.protectionSpace.serverTrust;
-            CFDataRef exceptions = SecTrustCopyExceptions(serverTrust);
-            SecTrustSetExceptions(serverTrust, exceptions);
-            CFRelease(exceptions);
-            newCredential = [NSURLCredential credentialForTrust:serverTrust];
-            completionHandler(NSURLSessionAuthChallengeUseCredential, newCredential);
-        } else {
-            completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, newCredential);
+    NSString* host = nil;
+    if (webView.URL != nil) {
+        host = webView.URL.host;
+    }
+    if ([[challenge protectionSpace] authenticationMethod] == NSURLAuthenticationMethodClientCertificate) {
+        completionHandler(NSURLSessionAuthChallengeUseCredential, clientAuthenticationCredential);
+        return;
+    }
+    if ([[challenge protectionSpace] serverTrust] != nil && customCertificatesForHost != nil && host != nil) {
+        SecCertificateRef localCertificate = (__bridge SecCertificateRef)([customCertificatesForHost objectForKey:host]);
+        if (localCertificate != nil) {
+            NSData *localCertificateData = (NSData*) CFBridgingRelease(SecCertificateCopyData(localCertificate));
+            SecTrustRef trust = [[challenge protectionSpace] serverTrust];
+            long count = SecTrustGetCertificateCount(trust);
+            for (long i = 0; i < count; i++) {
+                SecCertificateRef serverCertificate = SecTrustGetCertificateAtIndex(trust, i);
+                if (serverCertificate == nil) { continue; }
+                NSData *serverCertificateData = (NSData *) CFBridgingRelease(SecCertificateCopyData(serverCertificate));
+                if ([serverCertificateData isEqualToData:localCertificateData]) {
+                    NSURLCredential *useCredential = [NSURLCredential credentialForTrust:trust];
+                    if (challenge.sender != nil) {
+                        [challenge.sender useCredential:useCredential forAuthenticationChallenge:challenge];
+                    }
+                    completionHandler(NSURLSessionAuthChallengeUseCredential, useCredential);
+                    return;
+                }
+            }
         }
+    }
+    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
 }
 
 RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
@@ -123,10 +149,10 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
 
   // Escape singlequotes or messages containing ' will fail
   NSString *quotedMessage = [message stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
-
   NSString *command = [NSString stringWithFormat: format, quotedMessage];
     [_webView evaluateJavaScript:command completionHandler:nil];
 //  [_webView stringByEvaluatingJavaScriptFromString:command];
+//    NSLog(@"*************: %@", command);
 }
 
 - (NSURL *)URL
@@ -152,6 +178,7 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
     // passing the redirect urls back here, so we ignore them if trying to load
     // the same url. We'll expose a call to 'reload' to allow a user to load
     // the existing page.
+      NSLog(@"+++++++: %@", request.URL);
     if ([request.URL isEqual:_webView.URL]) {
       return;
     }
@@ -237,7 +264,7 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
 
   UIView* subview;
   for (UIView* view in _webView.scrollView.subviews) {
-    if([[view.class description] hasPrefix:@"WKWeb"])
+    if([[view.class description] hasPrefix:@"UIWeb"])
       subview = view;
   }
 
@@ -319,15 +346,65 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
         @"navigationType": @(navigationAction.navigationType)
       }];
       _onLoadingStart(event);
-        NSLog(@"%@*********: ", (navigationAction.request.URL).absoluteString);
     }
   }
-
   // JS Navigation handler
   decisionHandler(WKNavigationActionPolicyAllow);
 }
 
-- (void)webView:(__unused WKWebView *)webView didFailLoadWithError:(NSError *)error
+/**
+ * Decides whether to allow or cancel a navigation after its response is known.
+ * @see https://developer.apple.com/documentation/webkit/wknavigationdelegate/1455643-webview?language=objc
+ */
+- (void)                    webView:(WKWebView *)webView
+  decidePolicyForNavigationResponse:(WKNavigationResponse *)navigationResponse
+                    decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler
+{
+  WKNavigationResponsePolicy policy = WKNavigationResponsePolicyAllow;
+  if (_onHttpError && navigationResponse.forMainFrame) {
+    if ([navigationResponse.response isKindOfClass:[NSHTTPURLResponse class]]) {
+      NSHTTPURLResponse *response = (NSHTTPURLResponse *)navigationResponse.response;
+      NSInteger statusCode = response.statusCode;
+
+      if (statusCode >= 400) {
+        NSMutableDictionary<NSString *, id> *httpErrorEvent = [self baseEvent];
+        [httpErrorEvent addEntriesFromDictionary: @{
+          @"url": response.URL.absoluteString,
+          @"statusCode": @(statusCode)
+        }];
+
+        _onHttpError(httpErrorEvent);
+      }
+
+      NSString *disposition = nil;
+      if (@available(iOS 13, *)) {
+        disposition = [response valueForHTTPHeaderField:@"Content-Disposition"];
+      }
+      BOOL isAttachment = disposition != nil && [disposition hasPrefix:@"attachment"];
+      if (isAttachment || !navigationResponse.canShowMIMEType) {
+        if (_onFileDownload) {
+          policy = WKNavigationResponsePolicyCancel;
+
+          NSMutableDictionary<NSString *, id> *downloadEvent = [self baseEvent];
+          [downloadEvent addEntriesFromDictionary: @{
+            @"downloadUrl": (response.URL).absoluteString,
+          }];
+          _onFileDownload(downloadEvent);
+        }
+      }
+    }
+  }
+
+  decisionHandler(policy);
+}
+
+/**
+ * Called when an error occurs while the web view is loading content.
+ * @see https://fburl.com/km6vqenw
+ */
+- (void)               webView:(WKWebView *)webView
+  didFailProvisionalNavigation:(WKNavigation *)navigation
+                     withError:(NSError *)error
 {
   if (_onLoadingError) {
     if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) {
@@ -338,14 +415,35 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
       return;
     }
 
+    if ([error.domain isEqualToString:@"WebKitErrorDomain"] && error.code == 102 || [error.domain isEqualToString:@"WebKitErrorDomain"] && error.code == 101) {
+      // Error code 102 "Frame load interrupted" is raised by the WKWebView
+      // when the URL is from an http redirect. This is a common pattern when
+      // implementing OAuth with a WebView.
+      return;
+    }
+
     NSMutableDictionary<NSString *, id> *event = [self baseEvent];
     [event addEntriesFromDictionary:@{
+      @"didFailProvisionalNavigation": @YES,
       @"domain": error.domain,
       @"code": @(error.code),
       @"description": error.localizedDescription,
     }];
     _onLoadingError(event);
   }
+}
+
+- (void)evaluateJS:(NSString *)js
+          thenCall: (void (^)(NSString*)) callback
+{
+  [_webView evaluateJavaScript: js completionHandler: ^(id result, NSError *error) {
+    if (callback != nil) {
+      callback([NSString stringWithFormat:@"%@", result]);
+    }
+    if (error != nil) {
+      RCTLogWarn(@"%@", [NSString stringWithFormat:@"Error evaluating injectedJavaScript: This is possibly due to an unsupported return type. Try adding true to the end of your injectedJavaScript string. %@", error]);
+    }
+  }];
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(null_unspecified WKNavigation *)navigation
@@ -376,7 +474,7 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:(NSCoder *)aDecoder)
       
       NSMutableDictionary<NSString *, id> *event = [self baseEvent];
       event[@"jsEvaluationValue"] = jsEvaluationValue;
-      NSLog(@"+++++++++: %@", jsEvaluationValue);
+      NSLog(@"+++++++++++: %@", jsEvaluationValue);
       _onLoadingFinish(event);
   }
   // we only need the final 'finishLoad' call so only fire the event when we're actually done loading.
